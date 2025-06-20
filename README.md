@@ -1,0 +1,2 @@
+The datafile 'Data.csv' contains a sample dataset of precipitation, which was obtained from one of the climate model predictions of the CMIP6 data for the region of Toronto. This data is only a sample data used for the fitting the NHPP model in the code.
+The file 'nhpp fitting to data. Rmd' is the mark down file that fits the data to a NHPP model with a log-linear rate function and a time dependent weibull intensity function using MLE and estimates the percentiles of the annual maximum value distribution over time.
