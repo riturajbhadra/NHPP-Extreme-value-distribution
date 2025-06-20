@@ -1,0 +1,202 @@
+---
+title: "mle estimation nhpp"
+output: pdf_document
+date: "2024-02-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(bbmle)
+library(tidyverse)
+```
+
+
+```{r}
+# Importing the data
+prec_data = read.csv('Data.csv')
+prec_data[,1] = as.Date(prec_data[,1])
+```
+
+
+
+```{r}
+
+#Threshold value in mm [theoretically the NHPP method is threshold invariant, but for simplicity of data handling, chose a threshold to isolate significant rainfall events]
+Threshold = c(40) 
+
+#Starting date from which the data set will be prepared for analysis and the time elapsed will be calculated since then:
+tstart = as.Date("2020-12-31")
+
+#Filtering the data to obtain the data from the desired time segment
+df0 <-   prec_data  %>% filter(time > tstart) 
+
+#Renaming the precipitation column
+colnames(df0)[2] <- "prec"
+
+df1 <- df0 %>% filter(prec > Threshold)
+
+```
+
+
+
+
+
+
+```{r}
+#NHPP log-linear rate function
+nhpp.rate <- function(lambda0, lambda1, t) {
+  return(exp(lambda0 + lambda1 * t))
+}
+
+#NHPP mean value function function for loglinear rate function
+nhpp.mvf <- function(lambda0, lambda1, t) {
+  if (lambda1 == 0) {
+    return(t * exp(lambda0))
+  } else {
+    return((exp(lambda0 + lambda1 * t) - exp(lambda0)) / lambda1)
+  }
+ 
+}
+
+#Negative log-likelihood function for the ML estimation of parameters
+neg.loglik <- function(par, t) {
+  lambda0 <- par[1]
+  lambda1 <- par[2]
+  #lambda2 <- par[3]
+  LL <-
+    sum(log(nhpp.rate(lambda0, lambda1, t))) - nhpp.mvf(lambda0, lambda1, 80)
+  return(-LL)
+}
+```
+
+
+```{r}
+#Performing the ML estimation for the parameters of the time-dependent log linear rate function
+par0 <- c(1, 0.1)
+
+#Counting the number of events considered
+nevents <- nrow(df1)
+
+#Obtaining the arrival time in years
+arr_times <-as.numeric(df1[, 1] -tstart) / 365
+  
+#Fitting the parameters by minimizing the negetive log likelihood
+fit <- optim(par0, neg.loglik, t = arr_times, method='BFGS')
+  
+#Storing the NHPP rate parameters
+NHPP_rate_params <- data.frame(n=nevents,
+                    lambda0 = as.numeric(fit$par[1]),
+                    lambda1 = as.numeric(fit$par[2]))
+
+#Displaying the NHPP rate parameters
+print(NHPP_rate_params)
+```
+
+
+```{r}
+#ESTIMATION OF THE SHOCK HEIGHT DISTRIBUTINO PARAMETERS FOR THE PROCESS IN THE FUTURE YEARS WITH VARIABLE THRESHOLD VALUES [Here the analysis was performed considering a weibull distribution, but the appropriate distribution can be chosen by fitting several distributions and performing model evalutation based on the likelihood ratios, or any other standards statistical tests]
+
+
+#Negetive log-likelihood function for the MLE evaluation
+weib.ns.negloglik <- function(par, x, t, thres) {
+  alpha <- par[1]
+  beta0 <- par[2]
+  beta1 <- par[3]
+  data <- x - thres
+  n <- length(x)
+  s <- 0
+  for (ii in 1:n) {
+    beta <- beta0 + beta1 * t[ii] #Beta is considered to be linear in time and alpha is kept constant
+    s <- s - log(dweibull(data[ii], alpha, beta))
+  }
+  return(s)
+}
+
+
+#Storing the shock heights
+sh <- df1[,2]
+ 
+#Fitting the non-stationary shock height distribution parameters using MLE 
+fit <-
+    optim(
+      c(0.8, 5, 0.01),
+      weib.ns.negloglik,
+      t = arr_times,
+      x = sh,
+      thres = Threshold,
+      lower = c(0.1, 0.1, -.01),
+      method = 'L-BFGS-B'
+    )
+  
+NHPP_shock_height_params <- data.frame(
+    loc = Threshold,
+    alpha = as.numeric(fit$par[1]),
+    beta0 = as.numeric(fit$par[2]),
+    beta1 = as.numeric(fit$par[3])
+  )
+  
+
+
+print(NHPP_shock_height_params)
+
+```
+At this point all the parameters of the NHPP model has been estimated using MLE, now, one can perform the extreme value analysis.
+```{r}
+#The extreme percentiles can be obtained by inverting the cdf of the maximum value, however, in this method, the CDF cannot be inverted in closed form which is why the percentile values need to be computed by numerically solving the equations.
+
+#Defining the sequence of years (used in this study data)
+yrs <- seq(2020, 2100, by = 10)
+
+#Defining the time in years which starts from 2020 in this case
+t <- yrs - 2020
+
+#This method obtain the three percentile values: the median, 95th percentile, and the 98th percentile
+pctile <- c(.5, .95, .98)
+
+#The objective function to solve for the percentile values using the model parameters obtained from MLE
+objective <- function(x,
+                      lambda0,
+                      lambda1,
+                      x0,
+                      alpha,
+                      beta0,
+                      beta1,
+                      t,
+                      p) {
+  exp(-nhpp.rate(lambda0, lambda1, t) * (1 - pweibull(x - x0, alpha, beta0 +
+                                                        beta1 * t))) - p
+}
+
+#Initialization of the dataframe to store the percentile values
+cdf_nhpp.ev <- data.frame()
+
+for (jj in 1:length(t)) {
+    #for each time value
+    for (kk in 1:length(pctile)) {
+      #for each of the percentile values
+      root <- uniroot(
+        objective,
+        lambda0 = NHPP_rate_params$lambda0[1],
+        lambda1 = NHPP_rate_params$lambda1[1],
+        x0 = NHPP_shock_height_params$loc[1],
+        alpha = NHPP_shock_height_params$alpha[1],
+        beta0 = NHPP_shock_height_params$beta0[1],
+        beta1 = NHPP_shock_height_params$beta1[1],
+        t = t[jj],
+        p = pctile[kk],
+        interval = c(Threshold, 200)
+      )
+      
+      temp <- data.frame(
+        Year = yrs[jj],
+        Percentile = pctile[kk],
+        value = root$root
+      )
+      cdf_nhpp.ev <- rbind(cdf_nhpp.ev , temp)
+    }
+}
+
+#Displaying the 95th percentile as a demonstration
+print(cdf_nhpp.ev[cdf_nhpp.ev$Percentile == 0.95,]) 
+
+```
